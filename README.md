@@ -8,6 +8,7 @@ Current version of lidR based workflow used with lidar data from DJI Zenmuse L1 
 -   Canopy Cover, Canopy Density
 -   Exploratory plots
 -   Standard metrics
+
 Please note that parameters that are hardcoded (catalog chunk size, resolution, algorithm settings) must be refined depending on study site.
 
 **Funding**: This project was funded by TERN Landscapes  
