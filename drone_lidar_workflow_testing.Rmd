@@ -1,0 +1,431 @@
+---
+title: "drone_lidar_workflow"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=FALSE, results = 'hide', warning=FALSE}
+library(lidR)
+library(RCSF)
+library(future)
+library(profvis)
+library(terra)
+library(raster)
+library(dplyr) # Install Rtools for compilation https://cran.r-project.org/bin/windows/Rtools/
+library(purrr)
+library(gdalUtilities)
+library(ggplot2)
+library(mapview)
+library(mapedit)
+#library(EBImage)
+library(viridis)
+library(RColorBrewer)
+#library(treetop)
+```
+## Drone lidar processing workflow
+Author: Poornima Sivanandam  
+Organisation: University of Tasmania  
+Email: poornima.sivanandam@utas.edu.au  
+#### Summary
+
+-   Read input directory as a LAScatalog
+
+-   Ground classification using Cloth Simualtion Filter (CSF)
+
+-   Generate Digital Terrain Model (DTM)
+
+-   Normalise heights using ground points
+
+-   Generate Canopy Height Model (CHM)
+
+-   Exploratory plots
+
+    -   Cross sections
+    -   Vertical profile
+
+-   Standard metrics
+
+-   Example of custom metrics
+
+Inputs required:
+
+1.  Directory containing las file(s)
+
+2.  Path for output files
+
+3.  Update default/hardcoded settings as required:
+-   Parameters used to classify ground, generate CHM/DTM, vertical profile, etc.
+
+-   Output resolution for grid layers
+
+-   Chunk settings in LAScatalog
+
+-   Number of threads used for parallel processing
+
+#### Settings for parallel processing
+
+```{r parallel proc}
+plan(multisession, workers = availableCores()/2)
+# set number of threads lidR should use for functions that are parallelised
+set_lidr_threads(availableCores()/2)
+```
+
+#### Path to input las file and output directory
+
+```{r dir paths}
+#
+# USER INPUT REQUIRED for input folder containing las file and output folder for intermediate files and results
+#
+in_dir = r"(F:\testing_lidar\20230215_Swansea\lidars\terra_las)"
+
+out_dir = r"(F:\lidr_workflow\20230215_Swansea\outputs\)"
+tmp_dir = r"(F:\lidr_workflow\20230215_Swansea\tmp\)"
+
+
+gnd_dir = paste(file.path(tmp_dir),"01_csf_gnd\\", sep="")
+norm_dir = paste(file.path(tmp_dir), "02_ht_norm\\", sep="")
+chm_dtm_dir = paste(file.path(tmp_dir), "03_chm_dtm\\", sep="")
+metrics_dir = paste(file.path(tmp_dir), "04_metrics\\", sep="")
+```
+
+```{r}
+dir.create(out_dir)
+dir.create(tmp_dir)
+dir.create(gnd_dir)
+dir.create(norm_dir)
+dir.create(chm_dtm_dir)
+dir.create(metrics_dir)
+```
+
+#### Function definitions
+
+```{r function definitions}
+# https://github.com/r-lidar/lidRbook/
+plot_transect <- function(las,
+                          p1 = c(min(las@data$X), mean(las@data$Y)),
+                          p2 = c(max(las@data$X), mean(las@data$Y)),
+                          width = 5)
+{
+  
+  data_clip <- clip_transect(las, p1, p2, width, xz=TRUE) # set xz=TRUE to reorient point cloud to fit on XZ coords.
+  
+  # ignore this - using xz true above. 
+  # plot Northing along x axis if transect is along Y axis.
+  # len_y = max(data_clip@data$Y) - min(data_clip@data$Y)
+  # len_x = max(data_clip@data$X) - min(data_clip@data$X)
+  # 
+  # #plot Y along X axis based on transect
+  # if(len_y > len_x) {
+  #   plot_x = data_clip@data$Y
+  # } else {
+  #   plot_x = data_clip@data$X
+  # }
+  p <- ggplot(data_clip@data, aes(X, Z, color = Z)) + 
+    geom_point(size = 0.5) + 
+    coord_equal() + 
+    theme_minimal() +
+    scale_color_gradientn(colours = plasma(50))
+  return(p)
+}
+```
+
+#### Create LASCatalog
+
+```{r create catalog}
+ctg <- readLAScatalog(in_dir)
+
+# create lax files for spatial indexing if not done already
+if(length(list.files(path = in_dir, pattern = "\\.lax$")) == 0) 
+  {lidR:::catalog_laxindex(ctg)}
+```
+
+```{r quality check}
+# quality check - las file or catalog?
+# TEST THIS 
+# https://gis.stackexchange.com/questions/351821/capture-and-parse-output-of-lascheck-from-lidr
+# las_check(las, FALSE)
+# parse errors and warnings?
+```
+
+#### Classify ground points
+
+```{r 1. ground classification}
+# USER to update parameters. 
+# set sloop_smooth to TRUE when terrain is steep
+mycsf <- csf(sloop_smooth=FALSE, cloth_resolution = 0.2, iterations = 500, class_threshold = 0.1)
+# Set catalog options
+opt_output_files(ctg) <- paste(gnd_dir, "csf_gnd_{ID}")
+opt_chunk_size(ctg) <- 100 # 50?
+opt_chunk_buffer(ctg) <- 10 
+opt_progress(ctg) <-FALSE
+```
+
+```{r plot chunks, echo=FALSE}
+plot(ctg, chunk = TRUE)
+```
+
+```{r csf}
+ctg_gnd_classified <- classify_ground(ctg, mycsf, last_returns = FALSE)
+lidR:::catalog_laxindex(ctg_gnd_classified)
+```
+
+```{r echo=FALSE}
+# see that they are georeferenced right
+plot(ctg_gnd_classified, mapview = TRUE, map.type = "Esri.WorldImagery")
+```
+```{r}
+# write ground classfied las
+ctg<-readLAScatalog(gnd_dir)
+las<-readLAS(ctg)
+writeLAS(las,file.path(out_dir, "gnd_classified.laz"))
+#thin point cloud
+# enter required density in random()
+#las<-decimate_points(las, random(165))
+#writeLAS(las,file.path(gnd_dir, "gnd_classified_thinned.las"))
+
+```
+#### Generate DTM
+
+```{r 2. Generate Digital Terrain Model (DTM)}
+# Set catalog options
+opt_output_files(ctg_gnd_classified) <- paste(chm_dtm_dir, "dtm_idw_{ID}", sep="")
+opt_progress(ctg_gnd_classified) <-FALSE
+
+plot(ctg_gnd_classified, chunk = TRUE)
+
+# USER INPUT: update resolution. HARDCODED to 5 cm.
+dtm_raster <- rasterize_terrain(ctg_gnd_classified, res=0.05, algorithm = knnidw(k = 10L, p = 2))
+writeRaster(dtm_raster, file.path(out_dir, "dtm_raster_05.tif"), filetype="GTiff")
+```
+
+#### Hillshade plot
+
+```{r hillshade and plot DTM, echo = FALSE}
+dtm_prod <- terrain(dtm_raster, v = c("slope", "aspect"), unit = "radians")
+dtm_hillshade <- shade(slope = dtm_prod$slope, aspect = dtm_prod$aspect)
+plot(dtm_hillshade, col =gray(0:30/30), legend = FALSE)
+```
+
+#### 3D plot
+
+```{r 3d plot}
+plot_dtm3d(dtm_raster)
+```
+
+#### Normalise point cloud
+
+```{r 3. normalise height}
+# Set catalog options
+opt_output_files(ctg_gnd_classified) <- paste(norm_dir, "ht_norm_{ID}", sep="")
+opt_merge(ctg_gnd_classified) <- TRUE 
+plot(ctg_gnd_classified, chunk = TRUE)
+
+ctg_norm <- normalize_height(ctg_gnd_classified, knnidw(k=10, p=2))
+lidR:::catalog_laxindex(ctg_norm)
+```
+
+```{r plot max Z at the chunk level}
+plot(ctg_norm["Max.Z"])
+```
+
+```{r test noise filter, eval = FALSE, echo = FALSE}
+
+# NOT USED
+filter_noise = function(las, sensitivity)
+{
+  if (is(las, "LAS"))
+  {
+    p95 <- pixel_metrics(las, ~quantile(Z, probs = 0.95), 10, pkg="raster")
+    las <- merge_spatial(las, p95, "p95")
+    las <- filter_poi(las, Z < p95*sensitivity)
+    las$p95 <- NULL
+    return(las)
+  }
+  
+  if (is(las, "LAScatalog"))
+  {
+    options <- list(
+      need_output_file = TRUE,    # Throw an error if no output template is provided
+      need_buffer = TRUE)         # Throw an error if buffer is 0
+    res <- catalog_map(las, filter_noise, sensitivity = sensitivity, .options = options)
+    return(res)
+  }
+}
+
+#ctg_norm<-readLAScatalog(norm_dir)
+opt_chunk_buffer(ctg_norm)<-10
+opt_output_files(ctg_norm) <-paste(norm_dir, "filter_{ID}")
+opt_progress(ctg_norm)<-FALSE
+plot(ctg_norm, chunk = TRUE)
+filter_noise(ctg_norm, 1.2)
+```
+
+#### Canopy Height Model
+
+```{r 4. Canopy Height Model using point 2 raster(p2r)}
+
+# Set catalog options
+opt_merge(ctg_norm) <- TRUE 
+opt_output_files(ctg_norm) <-paste(chm_dtm_dir, "chm_{ID}", sep="")
+opt_progress(ctg_norm)<-FALSE
+plot(ctg_norm, chunk = TRUE)
+
+# USER INPUT: update parameters. Resolution hardcoded to 5 cm.
+chm_p2r_ctg = rasterize_canopy(ctg_norm, res=0.05, p2r(0.2))
+plot(chm_p2r_ctg, col = viridis(10))
+
+writeRaster(chm_p2r_ctg, file.path(out_dir, "chm_p2r20_05.tif"), filetype="GTiff")
+```
+
+#### User-defined metrics
+
+#### Canopy cover
+
+```{r Canopy cover}
+canopyCover = function(z, rn){
+  first  = rn == 1L
+  zfirst = z[first]
+  num_first_rtns = length(zfirst)
+  first_above_thres = sum(zfirst > 1.4)
+  x = (first_above_thres/num_first_rtns) # output as fraction 
+  return(x)
+}
+opt_output_files(ctg_norm) <-paste(chm_dtm_dir, "ccov_{ID}", sep="")
+# USER INPUT: update resolution. HARDCODED to 1 m.
+canopy_cover = pixel_metrics(ctg_norm, ~canopyCover(Z, rn=ReturnNumber), res = 1)
+plot(canopy_cover, col = viridis(20))
+writeRaster(canopy_cover, file.path(out_dir, "canopy_cover_1m.tif"), filetype="GTiff")
+```
+
+#### Canopy density
+
+```{r Canopy density}
+canopyDensity = function(z){
+  num_rtns = length(z)
+  num_above_thres = sum(z > 1.4)
+  x = (num_above_thres/num_rtns) # output as fraction 
+  return(x)
+}
+opt_output_files(ctg_norm) <-paste(chm_dtm_dir, "cdns_{ID}", sep="")
+# USER INPUT: update resolution. HARDCODED to 1 m.
+canopy_dns = pixel_metrics(ctg_norm, ~canopyDensity(Z), res = 1)
+plot(canopy_dns, col = viridis(20))
+writeRaster(canopy_dns, file.path(out_dir, "canopy_dns_1m.tif"), filetype="GTiff")
+```
+
+#### Plot transects
+
+```{r  Filter points from normalised point cloud}
+# filter points
+opt_filter(ctg_norm) <- "-drop_z_below 0"
+opt_select(ctg_norm) <- "Z"
+las <- readLAS(ctg_norm)
+```
+
+```{r plot cross section}
+# Using default values, width = 5 m, cross section along x-axis
+plot_transect(las)
+
+# Set point coordinates to plot cross section along Y-axis, 
+plot_transect(las, p1 = c(mean(las@data$X), min(las@data$Y)), 
+              p2 = c(mean(las@data$X), max(las@data$Y)), 
+              width = 5)
+```
+
+#### Vertical profiles
+
+```{r vertical profile - histogram}
+
+func_read_z <- function(chunk){
+  las <- readLAS(chunk) 
+  if(is.empty(las)) return(NULL)
+  df = data.frame(Z = las$Z)
+  return(df)
+}
+# Reading z values from points, do not need a buffer.
+# Set need_buffer false and buffer to 0. catlog_apply does not automatically crop buffer.
+options <- list(automerge = TRUE, need_buffer=FALSE)
+#edit these options to plot last returns or other z thresholds
+opt_filter(ctg_norm) <- "-drop_z_below 1.5"
+opt_chunk_buffer(ctg_norm) = 0
+df <- catalog_apply(ctg_norm, func_read_z, .options = options)
+
+```
+
+```{r}
+# catalog_apply will either return list of txt files or a data frame.
+# if list of txt files, read it into a dataframe first
+if(typeof(df) == "character") {
+  df <- df %>%
+        map_df(read.csv, sep = "")
+  }
+
+```
+
+```{r vertical profile 1}
+ggplot(df, aes(x = Z)) +
+  geom_histogram(breaks = seq(0, max(df$Z), 2),
+                 #bins = 10, boundary = 0,
+                 aes(y = ((..count..)/sum(..count..)) * 100),
+                 colour = "black",
+                 fill = "white") +
+  scale_y_continuous("% returns") + #, limits = c(0, 100)) +
+  scale_x_continuous("Height (m)") +
+  #  facet_wrap(~plot_id, ncol = 3, nrow = 1) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        panel.border = element_rect(colour = "black")) +
+  coord_flip() 
+```
+
+```{r vertical profile 2}
+ggplot(df, aes(x=Z)) +
+  geom_freqpoly(aes(y = ((..count..)/sum(..count..)) * 100),
+                binwidth = 2) +
+  scale_y_continuous("% returns") + #, limits = c(0, 100)) +
+  scale_x_continuous("Height (m)") + #, limits = c(0, max(df$Z))) +
+  theme_bw() + 
+  theme(strip.background = element_blank(),
+        panel.border = element_rect(colour = "black")) + 
+  coord_flip()
+
+```
+```{r}
+# TODO: below chunks are experimental..exit knit here.
+#knitr::knit_exit()
+```
+
+
+#### Grid metrics
+
+```{r Grid metrics}
+opt_select(ctg_norm) <- "z"
+opt_filter(ctg_norm) <- "-drop_z_below 0"
+
+opt_output_files(ctg_norm) <-paste(metrics_dir, "metrics_{ID}", sep="")
+# USER INPUT: update resolution. HARDCODED to 1 m.
+std_metrics_raster <- pixel_metrics(ctg_norm, .stdmetrics_z, res = 1)
+
+# TODO: debug: names does nothing here: layers saved as band 1, band 2, etc. in tiff file.
+terra::writeRaster(std_metrics_raster, file.path(out_dir, "pixel_std_metrics_1m.tiff"), 
+                   filetype = "GTiff", overwrite = TRUE, names = names(std_metrics_raster))
+
+# write as separate files and name using names()
+# terra::writeRaster(std_metrics_raster, paste0(file.path(metrics_dir), names(std_metrics_raster), ".tif"), 
+#                    filetype = "GTiff", overwrite = TRUE)
+
+# Tried the following:
+# writing single tiff - with this the layer names are filename.1, ..so on.
+# gdal_translate(file.path(metrics_dir,"pixel_metrics.vrt"), file.path(metrics_dir, "pixel_metrics.tiff"))
+
+
+```
+
+```{r Plot some metrics}
+plot(std_metrics_raster)
+```
