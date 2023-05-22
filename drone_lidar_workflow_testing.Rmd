@@ -27,10 +27,13 @@ library(viridis)
 library(RColorBrewer)
 #library(treetop)
 ```
+
 ## Drone lidar processing workflow
-Author: Poornima Sivanandam  
-Organisation: University of Tasmania  
-Email: poornima.sivanandam@utas.edu.au  
+
+Author: Poornima Sivanandam\
+Organisation: University of Tasmania\
+Email: [poornima.sivanandam\@utas.edu.au](mailto:poornima.sivanandam@utas.edu.au){.email}
+
 #### Summary
 
 -   Read input directory as a LAScatalog
@@ -52,13 +55,16 @@ Email: poornima.sivanandam@utas.edu.au
 
 -   Example of custom metrics
 
+Please see lidR book at <https://r-lidar.github.io/lidRbook/>
+
 Inputs required:
 
 1.  Directory containing las file(s)
 
 2.  Path for output files
 
-3.  Update default/hardcoded settings as required:
+3.  Update default/hardcoded settings as required (search for HARDCODED):
+
 -   Parameters used to classify ground, generate CHM/DTM, vertical profile, etc.
 
 -   Output resolution for grid layers
@@ -72,6 +78,7 @@ Inputs required:
 ```{r parallel proc}
 plan(multisession, workers = availableCores()/2)
 # set number of threads lidR should use for functions that are parallelised
+# HARDCODED here to half of available threads
 set_lidr_threads(availableCores()/2)
 ```
 
@@ -79,12 +86,13 @@ set_lidr_threads(availableCores()/2)
 
 ```{r dir paths}
 #
-# USER INPUT REQUIRED for input folder containing las file and output folder for intermediate files and results
+# USER INPUT REQUIRED for input folder containing las file, output folder for results
 #
 in_dir = r"(F:\testing_lidar\20230215_Swansea\lidars\terra_las)"
+out_dir = r"(F:\lidr_outputs\20230519_test_lidr\)"
 
-out_dir = r"(F:\lidr_workflow\20230215_Swansea\outputs\)"
-tmp_dir = r"(F:\lidr_workflow\20230215_Swansea\tmp\)"
+# tmp folder for intermediate results (chunk outputs - delete on checking results) 
+tmp_dir = r"(F:\lidr_outputs\20230519_test_lidr\)" 
 
 
 gnd_dir = paste(file.path(tmp_dir),"01_csf_gnd\\", sep="")
@@ -105,7 +113,7 @@ dir.create(metrics_dir)
 #### Function definitions
 
 ```{r function definitions}
-# https://github.com/r-lidar/lidRbook/
+# Reference: https://github.com/r-lidar/lidRbook/
 plot_transect <- function(las,
                           p1 = c(min(las@data$X), mean(las@data$Y)),
                           p2 = c(max(las@data$X), mean(las@data$Y)),
@@ -160,6 +168,9 @@ if(length(list.files(path = in_dir, pattern = "\\.lax$")) == 0)
 mycsf <- csf(sloop_smooth=FALSE, cloth_resolution = 0.2, iterations = 500, class_threshold = 0.1)
 # Set catalog options
 opt_output_files(ctg) <- paste(gnd_dir, "csf_gnd_{ID}")
+# Note: the warning "## Be careful, a chunk size smaller than 250 is likely to be irrelevant." likely does not account
+# for high density drone point clouds.
+# HARDCODED size. Other chunk sizes might be appropriate, for example, a smaller chunk size for a more dense point cloud
 opt_chunk_size(ctg) <- 100 # 50?
 opt_chunk_buffer(ctg) <- 10 
 opt_progress(ctg) <-FALSE
@@ -178,6 +189,7 @@ lidR:::catalog_laxindex(ctg_gnd_classified)
 # see that they are georeferenced right
 plot(ctg_gnd_classified, mapview = TRUE, map.type = "Esri.WorldImagery")
 ```
+
 ```{r}
 # write ground classfied las
 ctg<-readLAScatalog(gnd_dir)
@@ -189,6 +201,7 @@ writeLAS(las,file.path(out_dir, "gnd_classified.laz"))
 #writeLAS(las,file.path(gnd_dir, "gnd_classified_thinned.las"))
 
 ```
+
 #### Generate DTM
 
 ```{r 2. Generate Digital Terrain Model (DTM)}
@@ -263,6 +276,7 @@ opt_output_files(ctg_norm) <-paste(norm_dir, "filter_{ID}")
 opt_progress(ctg_norm)<-FALSE
 plot(ctg_norm, chunk = TRUE)
 filter_noise(ctg_norm, 1.2)
+# END NOT USED
 ```
 
 #### Canopy Height Model
@@ -291,7 +305,7 @@ canopyCover = function(z, rn){
   first  = rn == 1L
   zfirst = z[first]
   num_first_rtns = length(zfirst)
-  first_above_thres = sum(zfirst > 1.4)
+  first_above_thres = sum(zfirst > 1.4) # HARCODED height threshold 1.4 m
   x = (first_above_thres/num_first_rtns) # output as fraction 
   return(x)
 }
@@ -328,7 +342,7 @@ las <- readLAS(ctg_norm)
 ```
 
 ```{r plot cross section}
-# Using default values, width = 5 m, cross section along x-axis
+# Using default values, width = 5 m (HARDCODED), cross section along x-axis
 plot_transect(las)
 
 # Set point coordinates to plot cross section along Y-axis, 
@@ -350,7 +364,7 @@ func_read_z <- function(chunk){
 # Reading z values from points, do not need a buffer.
 # Set need_buffer false and buffer to 0. catlog_apply does not automatically crop buffer.
 options <- list(automerge = TRUE, need_buffer=FALSE)
-#edit these options to plot last returns or other z thresholds
+#HARDCODED threshold. Edit these options to plot last returns or other z thresholds
 opt_filter(ctg_norm) <- "-drop_z_below 1.5"
 opt_chunk_buffer(ctg_norm) = 0
 df <- catalog_apply(ctg_norm, func_read_z, .options = options)
@@ -395,11 +409,11 @@ ggplot(df, aes(x=Z)) +
   coord_flip()
 
 ```
+
 ```{r}
 # TODO: below chunks are experimental..exit knit here.
 #knitr::knit_exit()
 ```
-
 
 #### Grid metrics
 
