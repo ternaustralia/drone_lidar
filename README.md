@@ -14,18 +14,23 @@ Please note that some of the parameters (search for 'HARDCODED'. e.g., catalog c
 
 Examples from the workflow: 
 LAS catalog chunks
+
 ![chunks](readme_img/chunks.JPG)
 
 Digital Terrain Model
+
 ![dtm](readme_img/dtm.JPG)
 
 Canopy Height Model
+
 ![chm](readme_img/chm.JPG)
 
 Vertical Profile
+
 ![Vertical Profile](readme_img/height_rets.JPG)
 
 LidR Standard Metrics
+
 ![metrics](readme_img/metrics.JPG)
 
 
